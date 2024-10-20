@@ -369,8 +369,8 @@ class _GeneralState extends State<_General> {
 
   Widget theme() {
     final current = MyTheme.getThemeModePreference().toShortString();
-    onChanged(String value) {
-      MyTheme.changeDarkMode(MyTheme.themeModeFromString(value));
+    onChanged(String value) async {
+      await MyTheme.changeDarkMode(MyTheme.themeModeFromString(value));
       setState(() {});
     }
 
@@ -1451,8 +1451,9 @@ class _NetworkState extends State<_Network> with AutomaticKeepAliveClientMixin {
               children: [
                 Obx(() => _LabeledTextField(context, 'ID Server', idController,
                     idErrMsg.value, enabled, secure)),
-                Obx(() => _LabeledTextField(context, 'Relay Server',
-                    relayController, relayErrMsg.value, enabled, secure)),
+                if (!isWeb)
+                  Obx(() => _LabeledTextField(context, 'Relay Server',
+                      relayController, relayErrMsg.value, enabled, secure)),
                 Obx(() => _LabeledTextField(context, 'API Server',
                     apiController, apiErrMsg.value, enabled, secure)),
                 _LabeledTextField(
