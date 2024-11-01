@@ -142,6 +142,7 @@ class FfiModel with ChangeNotifier {
   bool get touchMode => _touchMode;
 
   bool get isPeerAndroid => _pi.platform == kPeerPlatformAndroid;
+  bool get isPeerMobile => isPeerAndroid;
 
   bool get viewOnly => _viewOnly;
 
@@ -375,7 +376,7 @@ class FfiModel with ChangeNotifier {
       } else if (name == 'plugin_option') {
         handleOption(evt);
       } else if (name == "sync_peer_hash_password_to_personal_ab") {
-        if (desktopType == DesktopType.main || isWeb) {
+        if (desktopType == DesktopType.main || isWeb || isMobile) {
           final id = evt['id'];
           final hash = evt['hash'];
           if (id != null && hash != null) {
@@ -638,7 +639,7 @@ class FfiModel with ChangeNotifier {
       {bool? hasCancel}) {
     msgBox(sessionId, type, title, text, link, dialogManager,
         hasCancel: hasCancel,
-        reconnect: reconnect,
+        reconnect: hasRetry ? reconnect : null,
         reconnectTimeout: hasRetry ? _reconnects : null);
     _timer?.cancel();
     if (hasRetry) {
@@ -1274,13 +1275,6 @@ class ImageModel with ChangeNotifier {
       if (isDesktop || isWebDesktop) {
         await parent.target?.canvasModel.updateViewStyle();
         await parent.target?.canvasModel.updateScrollStyle();
-      } else {
-        final size = MediaQueryData.fromWindow(ui.window).size;
-        final canvasWidth = size.width;
-        final canvasHeight = size.height;
-        final xscale = canvasWidth / image.width;
-        final yscale = canvasHeight / image.height;
-        parent.target?.canvasModel.scale = min(xscale, yscale);
       }
       if (parent.target != null) {
         await initializeCursorAndCanvas(parent.target!);
@@ -1472,10 +1466,14 @@ class CanvasModel with ChangeNotifier {
 
   updateViewStyle({refreshMousePos = true}) async {
     Size getSize() {
-      final size = MediaQueryData.fromWindow(ui.window).size;
+      final mediaData = MediaQueryData.fromView(ui.window);
+      final size = mediaData.size;
       // If minimized, w or h may be negative here.
       double w = size.width - leftToEdge - rightToEdge;
       double h = size.height - topToEdge - bottomToEdge;
+      if (isMobile) {
+        h -= (mediaData.padding.top + mediaData.viewInsets.bottom);
+      }
       return Size(w < 0 ? 0 : w, h < 0 ? 0 : h);
     }
 
@@ -1649,21 +1647,32 @@ class CanvasModel with ChangeNotifier {
     // (focalPoint.dx - _x_1) / s1 + displayOriginX = (focalPoint.dx - _x_2) / s2 + displayOriginX
     // _x_2 = focalPoint.dx - (focalPoint.dx - _x_1) / s1 * s2
     _x = focalPoint.dx - (focalPoint.dx - _x) / s * _scale;
-    final adjustForKeyboard =
-        parent.target?.cursorModel.adjustForKeyboard() ?? 0.0;
-    // (focalPoint.dy - _y_1 + adjust) / s1 + displayOriginY = (focalPoint.dy - _y_2 + adjust) / s2 + displayOriginY
-    // _y_2 = focalPoint.dy + adjust - (focalPoint.dy - _y_1 + adjust) / s1 * s2
-    _y = focalPoint.dy +
-        adjustForKeyboard -
-        (focalPoint.dy - _y + adjustForKeyboard) / s * _scale;
+    // (focalPoint.dy - _y_1) / s1 + displayOriginY = (focalPoint.dy - _y_2) / s2 + displayOriginY
+    // _y_2 = focalPoint.dy - (focalPoint.dy - _y_1) / s1 * s2
+    _y = focalPoint.dy - (focalPoint.dy - _y) / s * _scale;
     notifyListeners();
   }
 
-  clear([bool notify = false]) {
+  // For reset canvas to the last view style
+  reset() {
+    _scale = _lastViewStyle.scale;
+    _devicePixelRatio = ui.window.devicePixelRatio;
+    if (kIgnoreDpi && _lastViewStyle.style == kRemoteViewStyleOriginal) {
+      _scale = 1.0 / _devicePixelRatio;
+    }
+    final displayWidth = getDisplayWidth();
+    final displayHeight = getDisplayHeight();
+    _x = (size.width - displayWidth * _scale) / 2;
+    _y = (size.height - displayHeight * _scale) / 2;
+    bind.sessionSetViewStyle(sessionId: sessionId, value: _lastViewStyle.style);
+    notifyListeners();
+  }
+
+  clear() {
     _x = 0;
     _y = 0;
     _scale = 1.0;
-    if (notify) notifyListeners();
+    _lastViewStyle = ViewStyle.defaultViewStyle();
   }
 
   updateScrollPercent() {
@@ -1874,7 +1883,6 @@ class CursorModel with ChangeNotifier {
   // `lastIsBlocked` is only used in common/widgets/remote_input.dart -> _RawTouchGestureDetectorRegionState -> onDoubleTap()
   // Because onDoubleTap() doesn't have the `event` parameter, we can't get the touch event's position.
   bool _lastIsBlocked = false;
-  double _yForKeyboardAdjust = 0;
 
   keyHelpToolsVisibilityChanged(Rect? r) {
     _keyHelpToolsRect = r;
@@ -1886,7 +1894,6 @@ class CursorModel with ChangeNotifier {
       // `lastIsBlocked` will be set when the cursor is moving or touch somewhere else.
       _lastIsBlocked = true;
     }
-    _yForKeyboardAdjust = _y;
   }
 
   get lastIsBlocked => _lastIsBlocked;
@@ -1938,19 +1945,6 @@ class CursorModel with ChangeNotifier {
   get keyboardHeight => MediaQueryData.fromWindow(ui.window).viewInsets.bottom;
   get scale => parent.target?.canvasModel.scale ?? 1.0;
 
-  double adjustForKeyboard() {
-    if (keyboardHeight < 100) {
-      return 0.0;
-    }
-
-    final m = MediaQueryData.fromWindow(ui.window);
-    final size = m.size;
-    final thresh = (size.height - keyboardHeight) / 2;
-    final h = (_yForKeyboardAdjust - getVisibleRect().top) *
-        scale; // local physical display height
-    return h - thresh;
-  }
-
   // mobile Soft keyboard, block touch event from the KeyHelpTools
   shouldBlock(double x, double y) {
     if (!(parent.target?.ffiModel.touchMode ?? false)) {
@@ -1971,16 +1965,16 @@ class CursorModel with ChangeNotifier {
       return false;
     }
     _lastIsBlocked = false;
-    moveLocal(x, y, adjust: adjustForKeyboard());
+    moveLocal(x, y);
     parent.target?.inputModel.moveMouse(_x, _y);
     return true;
   }
 
-  moveLocal(double x, double y, {double adjust = 0}) {
+  moveLocal(double x, double y) {
     final xoffset = parent.target?.canvasModel.x ?? 0;
     final yoffset = parent.target?.canvasModel.y ?? 0;
     _x = (x - xoffset) / scale + _displayOriginX;
-    _y = (y - yoffset + adjust) / scale + _displayOriginY;
+    _y = (y - yoffset) / scale + _displayOriginY;
     notifyListeners();
   }
 
@@ -1988,7 +1982,7 @@ class CursorModel with ChangeNotifier {
     _x = _displayOriginX;
     _y = _displayOriginY;
     parent.target?.inputModel.moveMouse(_x, _y);
-    parent.target?.canvasModel.clear(true);
+    parent.target?.canvasModel.reset();
     notifyListeners();
   }
 
@@ -2462,6 +2456,7 @@ class FFI {
     String? switchUuid,
     String? password,
     bool? isSharedPassword,
+    String? connToken,
     bool? forceRelay,
     int? tabWindowId,
     int? display,
@@ -2498,6 +2493,7 @@ class FFI {
         forceRelay: forceRelay ?? false,
         password: password ?? '',
         isSharedPassword: isSharedPassword ?? false,
+        connToken: connToken,
       );
     } else if (display != null) {
       if (displays == null) {
